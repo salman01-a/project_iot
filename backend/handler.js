@@ -1,5 +1,14 @@
 import mysql from 'mysql';
+import mqtt from 'mqtt';
 
+const mqttClient = mqtt.connect('mqtt://broker.emqx.io');
+mqttClient.on('connect', () => {
+  console.log('Connected to MQTT broker');
+});
+
+mqttClient.on('error', (err) => {
+  console.error('MQTT connection error: ', err);
+});
 
 // Buat koneksi global (tidak perlu connect/disconnect tiap request)
 const connection = mysql.createConnection({
@@ -35,7 +44,7 @@ connection.connect((err) => {
   });
 });
 
-const SaveDataHandler = (req, res) => {
+const SaveDataHandler = (req, res, next) => {
   const { ultrasonic_data, raindrops_status } = req.body;
 
   if (ultrasonic_data === undefined || raindrops_status === undefined) {
@@ -69,4 +78,22 @@ connection.query(query, (error, results) => {
 });
 }
 
-export { SaveDataHandler, getDataHandler }; 
+const commandTopic = (req, res) => {
+  let { otomatis, led, buzzer, servo } = req.body;
+
+  if(otomatis === true){
+    led = false;
+    buzzer = false;
+    servo = false;
+  }
+  const commandMessage = JSON.stringify({ otomatis, led, buzzer, servo });
+  mqttClient.publish('/iot/upn/if23', commandMessage, (err) => {
+    if (err) {
+      console.error('Error publishing MQTT message:', err);
+      return res.status(500).json({ message: 'Error sending command' });
+    }
+    res.status(200).json({ message: 'Command sent successfully' });
+  });
+}
+
+export { SaveDataHandler, getDataHandler, commandTopic }; 

@@ -1,10 +1,16 @@
-#main.py untuk iot  
 from machine import Pin, ADC, PWM, time_pulse_us
 import time
 import network
 import ujson
 import urequests
 import gc
+from umqtt.simple import MQTTClient
+
+# --- Variabel Global untuk Command ---
+otomatis = True  # Default mode otomatis aktif
+led_status = False
+buzzer_status = False
+servo_status = False  # False = 0°, True = 180°
 
 # --- CONFIG WiFi ---
 ssid = 'POCOPHONE F1'
@@ -12,6 +18,11 @@ password = 'halohalo'
 
 API_URL = "http://10.210.2.12:8000/data"
 SEND_INTERVAL_S = 10
+
+# MQTT Configuration
+MQTT_BROKER = "broker.emqx.io"
+MQTT_TOPIC = "/iot/upn/if23"
+MQTT_CLIENT_ID = "esp32_sensor_01"
 
 # --- Pin Configuration ---
 TRIG_PIN = 18
@@ -54,6 +65,80 @@ def wifi_connect(ssid_local, pass_local, timeout=15000):
 
 wifi_connect(ssid, password)
 
+# --- Fungsi Servo Sederhana (0° atau 180° saja) ---
+def set_servo_simple(status):
+    # status: False = 0°, True = 180°
+    if status:
+        # 180 derajat
+        duty = int(1500 / 20000 * 65535)  # 2500us untuk 180°
+    else:
+        # 0 derajat  
+        duty = int(500 / 20000 * 65535)   # 500us untuk 0°
+    
+    try:
+        servo.duty_u16(duty)
+    except AttributeError:
+        try:
+            servo.duty(duty // 256)
+        except:
+            pass
+
+# --- MQTT Callback Function ---
+def sub_cb(topic, msg):
+    global otomatis, led_status, buzzer_status, servo_status
+    
+    message = msg.decode().lower()
+    print(f"Received message on topic '{topic.decode()}' : {message}")
+    
+    try:
+        # Parsing pesan JSON
+        data = ujson.loads(message)
+        
+        if "otomatis" in data:
+            otomatis = bool(data["otomatis"])
+            print(f"Mode otomatis: {'AKTIF' if otomatis else 'MANUAL'}")
+        
+        if not otomatis:  # Hanya proses perintah manual jika mode manual
+            if "led" in data:
+                led_status = bool(data["led"])
+                led.value(led_status)
+                #led.on() if led_status else led.off()
+                print(f"LED: {'ON' if led_status else 'OFF'}")
+            
+            if "buzzer" in data:
+                buzzer_status = bool(data["buzzer"])
+                #buzzer.value(buzzer_status)
+                print(f"Buzzer: {'ON' if buzzer_status else 'OFF'}")
+                #buzzer.on() if buzzer_status else led.off()
+                if buzzer_status :
+                    buzzer.on()
+                else :
+                    buzzer.off()
+            
+            if "servo" in data:
+                servo_status = bool(data["servo"])
+                set_servo_simple(servo_status)
+                print(f"Servo: {'ON (180°)' if servo_status else 'OFF (0°)'}")
+                
+    except Exception as e:
+        print("Error parsing MQTT message:", e)
+
+def setup_mqtt():
+    try:
+        client = MQTTClient(MQTT_CLIENT_ID, MQTT_BROKER)
+        client.connect()
+        client.set_callback(sub_cb)
+        print("Connected to MQTT broker!")
+        client.subscribe(MQTT_TOPIC.encode())
+        print(f"Subscribed to '{MQTT_TOPIC}'")
+        return client
+    except Exception as e:
+        print("MQTT connection failed:", e)
+        return None
+
+# Initialize MQTT client
+mqtt_client = setup_mqtt()
+
 # --- Fungsi Sensor ---
 def get_distance():
     trig.value(0)
@@ -70,26 +155,12 @@ def get_distance():
     distance_cm = (duration / 2) * 0.0343
     return distance_cm
 
-def set_servo_angle(angle):
-    angle = max(0, min(180, angle))
-    min_us = 500
-    max_us = 2500
-    us = min_us + (max_us - min_us) * (angle / 180)
-    duty = int(us / 20000 * 65535)
-    try:
-        servo.duty_u16(duty)
-    except AttributeError:
-        try:
-            servo.duty(duty // 256)
-        except:
-            pass
-
 def cek_hujan():
     try:
         value = rain_sensor.read()
     except Exception:
         value = None
-    status = "Hujan" if value and value < 2000 else "Tidak Hujan"
+    status = "Hujan" if value and value < 3500 else "Tidak Hujan"
     return value, status
 
 def send_data(url, ultrasonic_data, raindrops_status):
@@ -113,30 +184,53 @@ def send_data(url, ultrasonic_data, raindrops_status):
         print("Gagal kirim data:", e)
         return False
 
+# --- Fungsi Kontrol Otomatis ---
+def kontrol_otomatis(jarak):
+    if jarak is not None and jarak < 3	:
+        led.on()
+        buzzer.on()
+        set_servo_simple(True)  # Servo ON (180°)
+    else:
+        led.off()
+        buzzer.off()
+        set_servo_simple(False)  # Servo OFF (0°)
+
 # --- Main Program ---
 print("Starting sensor monitoring...")
+print("Default mode: OTOMATIS")
 last_sent = time.ticks_ms()
 
 while True:
+    # Check for MQTT messages if client is connected
+    if mqtt_client:
+        try:
+            mqtt_client.check_msg()
+        except Exception as e:
+            print("MQTT error:", e)
+            # Try to reconnect
+            mqtt_client = setup_mqtt()
+    
+    # Sensor reading
     jarak = get_distance()
     rain_value, status_hujan = cek_hujan()
 
     if jarak is not None:
-        print("Jarak: {:.2f} cm | Status: {}".format(jarak, status_hujan))
+        print("Jarak: {:.2f} cm | Status: {} | Mode: {}".format(
+            jarak, status_hujan, "OTOMATIS" if otomatis else "MANUAL"))
     else:
-        print("Jarak: Tidak terdeteksi | Status: {}".format(status_hujan))
+        print("Jarak: Tidak terdeteksi | Status: {} | Mode: {}".format(
+            status_hujan, "OTOMATIS" if otomatis else "MANUAL"))
 
-    # Control logic
-    if jarak is not None and jarak < 10:
-        led.on()
-        buzzer.on()
-        set_servo_angle(180)
+    # Control logic berdasarkan mode
+    if otomatis:
+        # Mode otomatis - kontrol berdasarkan sensor
+        kontrol_otomatis(jarak)
     else:
-        led.off()
-        buzzer.off()
-        set_servo_angle(0)
+        # Mode manual - kontrol sudah dilakukan di callback MQTT
+        # Tetap update display status
+        pass
 
-    # Kirim data setiap interval
+    # Kirim data sensor setiap interval (terlepas dari mode)
     if time.ticks_diff(time.ticks_ms(), last_sent) >= SEND_INTERVAL_S * 1000:
         last_sent = time.ticks_ms()
 
@@ -150,3 +244,4 @@ while True:
             print("No WiFi - Data not sent")
 
     time.sleep(1)
+

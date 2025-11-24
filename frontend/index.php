@@ -1,6 +1,7 @@
 <?php
 // Konfigurasi API
-$api_url = 'http://localhost:8000/data'; // Ganti dengan URL API Anda
+$api_url = 'http://localhost:8000/data';
+$latest_api_url = 'http://localhost:8000/latest';
 
 // Fungsi untuk mengambil data dari API
 function fetchDataFromAPI($url) {
@@ -22,6 +23,7 @@ function fetchDataFromAPI($url) {
 
 // Ambil data dari API
 $api_data = fetchDataFromAPI($api_url);
+$latest_api_data = fetchDataFromAPI($latest_api_url);
 
 // Jika API tidak tersedia, gunakan data dummy sebagai fallback
 if (!$api_data || !isset($api_data['data'])) {
@@ -96,15 +98,31 @@ if (!$api_data || !isset($api_data['data'])) {
     }
 }
 
-// Data current dari data terakhir
-$current_data = [
-    'distance' => $history_data[count($history_data)-1]['distance'],
-    'rain_status' => $history_data[count($history_data)-1]['rain'],
-    'mode' => 'auto',
-    'servo_status' => 'ON',
-    'led_status' => 'ON', 
-    'buzzer_status' => 'OFF'
-];
+// Data current - ambil dari API latest jika tersedia, atau dari data historis
+if ($latest_api_data && $latest_api_data['success'] && $latest_api_data['data']) {
+    // Gunakan data dari API latest
+    $current_data = [
+        'distance' => $latest_api_data['data']['ultrasonic_data'],
+        'rain_status' => $latest_api_data['data']['raindrops_status'],
+        'mode' => $latest_api_data['device']['mode'],
+        'servo_status' => $latest_api_data['device']['servo'] ? 'ON' : 'OFF',
+        'led_status' => $latest_api_data['device']['led'] ? 'ON' : 'OFF', 
+        'buzzer_status' => $latest_api_data['device']['buzzer'] ? 'ON' : 'OFF'
+    ];
+} else {
+    // Fallback ke data historis
+    $last_data = $history_data[count($history_data)-1];
+    $is_activated = $last_data['distance'] < 10;
+
+    $current_data = [
+        'distance' => $last_data['distance'],
+        'rain_status' => $last_data['rain'],
+        'mode' => 'otomatis', // Default mode otomatis
+        'servo_status' => $is_activated ? 'ON' : 'OFF',
+        'led_status' => $is_activated ? 'ON' : 'OFF', 
+        'buzzer_status' => $is_activated ? 'ON' : 'OFF'
+    ];
+}
 
 // Data untuk grafik 24 jam
 $chart_labels = [];
@@ -120,7 +138,6 @@ foreach ($history_data as $data) {
 $json_data = json_encode($history_data);
 ?>
 
-<!-- HTML dan JavaScript tetap sama seperti sebelumnya -->
 <!DOCTYPE html>
 <html lang="id">
 <head>
@@ -132,7 +149,6 @@ $json_data = json_encode($history_data);
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@2.2.1/dist/chartjs-plugin-annotation.min.js"></script>
     <style>
-        /* CSS styles tetap sama */
         .card {
             box-shadow: 0 4px 6px rgba(0,0,0,0.1);
             margin-bottom: 20px;
@@ -208,6 +224,23 @@ $json_data = json_encode($history_data);
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
         }
+        .servo-toggle {
+            transform: scale(1.5);
+            margin: 0 10px;
+        }
+        .loading-spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
@@ -219,12 +252,14 @@ $json_data = json_encode($history_data);
                     <h1 class="display-6"><i class="fas fa-water me-2"></i>Sistem Monitoring Sungai</h1>
                     <div class="d-flex align-items-center">
                         <span class="badge bg-success me-2">Live</span>
-                        <small class="text-muted">Last updated: <?= date('Y-m-d H:i:s') ?></small>
-                        <?php if ($api_data): ?>
-                            <span class="badge bg-info ms-2">API Connected</span>
-                        <?php else: ?>
-                            <span class="badge bg-warning ms-2">Using Fallback Data</span>
-                        <?php endif; ?>
+                        <small class="text-muted" id="lastUpdated">Last updated: <?= date('Y-m-d H:i:s') ?></small>
+                        <span class="badge ms-2" id="apiStatus">
+                            <?php if ($latest_api_data && $latest_api_data['success']): ?>
+                                <span class="badge bg-info">API Connected</span>
+                            <?php else: ?>
+                                <span class="badge bg-warning">Using Fallback Data</span>
+                            <?php endif; ?>
+                        </span>
                     </div>
                 </div>
             </div>
@@ -241,8 +276,15 @@ $json_data = json_encode($history_data);
                             <div class="col-6">
                                 <div class="text-center">
                                     <i class="fas fa-ruler-vertical fa-3x mb-2"></i>
-                                    <h3 id="rt-distance"><?= $current_data['distance'] ?> cm</h3>
+                                    <h3 id="rt-distance"><?= number_format($current_data['distance'], 2) ?> cm</h3>
                                     <p class="mb-0">Ketinggian Air</p>
+                                    <small class="text-warning" id="distance-warning">
+                                        <?php if ($current_data['distance'] < 10): ?>
+                                            ⚠️ Tinggi air kritis!
+                                        <?php else: ?>
+                                            ✓ Tinggi air normal
+                                        <?php endif; ?>
+                                    </small>
                                 </div>
                             </div>
                             <div class="col-6">
@@ -272,33 +314,47 @@ $json_data = json_encode($history_data);
                                     <span class="h5">Mode Operasi:</span>
                                     <div class="form-check form-switch">
                                         <input class="form-check-input" type="checkbox" id="modeAuto" 
-                                            <?= $current_data['mode'] == 'manual' ? 'checked' : '' ?> style="width: 60px; height: 30px;">
+                                            <?= $current_data['mode'] == 'otomatis' ? 'checked' : '' ?> style="width: 60px; height: 30px;">
                                         <label class="form-check-label h5" for="modeAuto">
-                                            <?= $current_data['mode'] == 'manual' ? 'Manual' : 'Otomatis' ?>
+                                            <span id="modeText"><?= $current_data['mode'] == 'otomatis' ? 'Otomatis' : 'Manual' ?></span>
                                         </label>
                                     </div>
                                 </div>
                                 
+                                <!-- Kontrol Servo ON/OFF -->
                                 <div class="mb-3" id="servoControl">
-                                    <label class="form-label">Servo Angle: <span id="servoValue">90</span>°</label>
-                                    <input type="range" class="form-range" min="0" max="180" id="servoRange">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <span class="h6">Servo Motor:</span>
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input servo-toggle" type="checkbox" id="servoToggle" 
+                                                <?= $current_data['servo_status'] == 'ON' ? 'checked' : '' ?>>
+                                            <label class="form-check-label h6" for="servoToggle">
+                                                <span id="servoStatusText"><?= $current_data['servo_status'] ?></span>
+                                            </label>
+                                        </div>
+                                    </div>
                                 </div>
 
                                 <div class="row" id="manualControls">
                                     <div class="col-4">
                                         <div class="form-check form-switch">
-                                            <input class="form-check-input" type="checkbox" id="ledToggle">
+                                            <input class="form-check-input" type="checkbox" id="ledToggle" 
+                                                <?= $current_data['led_status'] == 'ON' ? 'checked' : '' ?>>
                                             <label class="form-check-label" for="ledToggle">LED</label>
                                         </div>
                                     </div>
                                     <div class="col-4">
                                         <div class="form-check form-switch">
-                                            <input class="form-check-input" type="checkbox" id="buzzerToggle">
+                                            <input class="form-check-input" type="checkbox" id="buzzerToggle"
+                                                <?= $current_data['buzzer_status'] == 'ON' ? 'checked' : '' ?>>
                                             <label class="form-check-label" for="buzzerToggle">Buzzer</label>
                                         </div>
                                     </div>
                                     <div class="col-4">
-                                        <button id="applyManual" class="btn btn-outline-light w-100">Terapkan</button>
+                                        <button id="applyManual" class="btn btn-outline-light w-100">
+                                            <span id="applyText">Terapkan</span>
+                                            <span id="applySpinner" class="loading-spinner d-none ms-2"></span>
+                                        </button>
                                     </div>
                                 </div>
                             </div>
@@ -319,17 +375,20 @@ $json_data = json_encode($history_data);
                                 <div class="border rounded p-3 bg-white bg-opacity-10">
                                     <i class="fas fa-cogs fa-2x mb-2"></i>
                                     <h5>Servo Motor</h5>
-                                    <span class="badge bg-success fs-6" id="servo-status">
-                                        ON
+                                    <span class="badge <?= $current_data['servo_status'] == 'ON' ? 'bg-success' : 'bg-secondary' ?> fs-6" id="servo-status">
+                                        <?= $current_data['servo_status'] ?>
                                     </span>
+                                    <div class="mt-2">
+                                        <small id="servoPosition">Posisi: <?= $current_data['servo_status'] == 'ON' ? '180° (Tertutup)' : '0° (Terbuka)' ?></small>
+                                    </div>
                                 </div>
                             </div>
                             <div class="col-md-4">
                                 <div class="border rounded p-3 bg-white bg-opacity-10">
                                     <i class="fas fa-lightbulb fa-2x mb-2"></i>
                                     <h5>LED Indicator</h5>
-                                    <span class="badge bg-warning fs-6" id="led-status">
-                                        ON
+                                    <span class="badge <?= $current_data['led_status'] == 'ON' ? 'bg-warning' : 'bg-secondary' ?> fs-6" id="led-status">
+                                        <?= $current_data['led_status'] ?>
                                     </span>
                                 </div>
                             </div>
@@ -337,8 +396,8 @@ $json_data = json_encode($history_data);
                                 <div class="border rounded p-3 bg-white bg-opacity-10">
                                     <i class="fas fa-bell fa-2x mb-2"></i>
                                     <h5>Buzzer Alarm</h5>
-                                    <span class="badge bg-secondary fs-6" id="buzzer-status">
-                                        OFF
+                                    <span class="badge <?= $current_data['buzzer_status'] == 'ON' ? 'bg-danger' : 'bg-secondary' ?> fs-6" id="buzzer-status">
+                                        <?= $current_data['buzzer_status'] ?>
                                     </span>
                                 </div>
                             </div>
@@ -383,25 +442,15 @@ $json_data = json_encode($history_data);
                                         <th>Waktu</th>
                                         <th>Ketinggian Air (cm)</th>
                                         <th>Status Hujan</th>
-                                        <th>Kategori</th>
+                                        <th>Status Sistem</th>
                                     </tr>
                                 </thead>
                                 <tbody id="historyTable">
                                     <?php 
                                     $display_data = array_slice($history_data, -10);
                                     foreach($display_data as $data): 
-                                        $kategori = '';
-                                        $badge_class = '';
-                                        if ($data['distance'] < 40) {
-                                            $kategori = 'Aman';
-                                            $badge_class = 'bg-success';
-                                        } elseif ($data['distance'] >= 40 && $data['distance'] < 60) {
-                                            $kategori = 'Waspada';
-                                            $badge_class = 'bg-warning';
-                                        } else {
-                                            $kategori = 'Bahaya';
-                                            $badge_class = 'bg-danger';
-                                        }
+                                        $status_sistem = $data['distance'] < 10 ? 'Aktif' : 'Non-Aktif';
+                                        $badge_class = $data['distance'] < 10 ? 'bg-danger' : 'bg-success';
                                     ?>
                                     <tr>
                                         <td><?= date('H:i', strtotime($data['time'])) ?></td>
@@ -412,7 +461,9 @@ $json_data = json_encode($history_data);
                                             </span>
                                         </td>
                                         <td>
-                                            <span class="badge <?= $badge_class ?>"><?= $kategori ?></span>
+                                            <span class="badge <?= $badge_class ?>">
+                                                <?= $status_sistem ?>
+                                            </span>
                                         </td>
                                     </tr>
                                     <?php endforeach; ?>
@@ -426,7 +477,7 @@ $json_data = json_encode($history_data);
     </div>
 
     <script>
-        // Data dari PHP
+        // Data dari PHP (untuk fallback)
         const data = <?= $json_data ?>;
         let currentIndex = data.length - 1;
         let currentRange = 96; // 24 jam * 4 data per jam
@@ -524,54 +575,16 @@ $json_data = json_encode($history_data);
                     },
                     annotation: {
                         annotations: {
-                            amanLine: {
-                                type: 'line',
-                                yMin: 40,
-                                yMax: 40,
-                                borderColor: 'rgb(40, 167, 69)',
-                                borderWidth: 2,
-                                borderDash: [5, 5],
-                                label: {
-                                    display: true,
-                                    content: 'Batas Aman',
-                                    position: 'start',
-                                    backgroundColor: 'rgb(40, 167, 69)',
-                                    color: 'white',
-                                    font: {
-                                        size: 10,
-                                        weight: 'bold'
-                                    }
-                                }
-                            },
-                            waspadaLine: {
-                                type: 'line',
-                                yMin: 60,
-                                yMax: 60,
-                                borderColor: 'rgb(255, 193, 7)',
-                                borderWidth: 2,
-                                borderDash: [5, 5],
-                                label: {
-                                    display: true,
-                                    content: 'Batas Waspada',
-                                    position: 'start',
-                                    backgroundColor: 'rgb(255, 193, 7)',
-                                    color: 'black',
-                                    font: {
-                                        size: 10,
-                                        weight: 'bold'
-                                    }
-                                }
-                            },
                             bahayaLine: {
                                 type: 'line',
-                                yMin: 80,
-                                yMax: 80,
+                                yMin: 10,
+                                yMax: 10,
                                 borderColor: 'rgb(220, 53, 69)',
                                 borderWidth: 2,
                                 borderDash: [5, 5],
                                 label: {
                                     display: true,
-                                    content: 'Batas Bahaya',
+                                    content: 'Batas Aktifasi (10cm)',
                                     position: 'start',
                                     backgroundColor: 'rgb(220, 53, 69)',
                                     color: 'white',
@@ -722,91 +735,254 @@ $json_data = json_encode($history_data);
             }
         }
 
-        // Update real-time data
-        function updateRealtime() {
-            currentIndex = (currentIndex + 1) % data.length;
-            const currentData = data[currentIndex];
+        // Fungsi untuk mengambil data real-time dari API
+        function fetchRealtimeData() {
+            fetch('http://localhost:8000/latest')
+                .then(response => response.json())
+                .then(apiData => {
+                    if (apiData.success) {
+                        updateDisplayWithRealtimeData(apiData);
+                    } else {
+                        console.error('Gagal mengambil data real-time');
+                        useFallbackData();
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching real-time data:', error);
+                    useFallbackData();
+                });
+        }
+
+        // Fungsi untuk update tampilan dengan data real-time
+        function updateDisplayWithRealtimeData(apiData) {
+            const sensorData = apiData.data;
+            const device = apiData.device;
             
-            document.getElementById('rt-distance').textContent = currentData.distance + ' cm';
-            document.getElementById('rt-rain-status').textContent = currentData.rain;
-            document.getElementById('rt-rain-status').className = 'badge ' + (currentData.rain === 'Hujan' ? 'badge-hujan' : 'badge-tidak-hujan');
+            // Update data sensor
+            if (sensorData && sensorData.ultrasonic_data !== undefined) {
+                document.getElementById('rt-distance').textContent = sensorData.ultrasonic_data.toFixed(2) + ' cm';
+            }
+            if (sensorData && sensorData.raindrops_status) {
+                document.getElementById('rt-rain-status').textContent = sensorData.raindrops_status;
+                document.getElementById('rt-rain-status').className = 'badge ' + 
+                    (sensorData.raindrops_status === 'Hujan' ? 'badge-hujan' : 'badge-tidak-hujan');
+            }
+
+            // Update warning message
+            const warningElement = document.getElementById('distance-warning');
+            if (sensorData && sensorData.ultrasonic_data < 10) {
+                warningElement.innerHTML = '⚠️ Tinggi air kritis! Sistem aktif.';
+                warningElement.className = 'text-danger';
+            } else {
+                warningElement.innerHTML = '✓ Tinggi air normal';
+                warningElement.className = 'text-success';
+            }
+
+            // Update status perangkat
+            if (device && device.mode !== undefined) {
+                const isAutoMode = device.mode === 'otomatis';
+                document.getElementById('modeAuto').checked = isAutoMode;
+                document.getElementById('modeText').textContent = isAutoMode ? 'Otomatis' : 'Manual';
+                toggleManualControls(!isAutoMode);
+                
+                // Update status aktuator
+                if (isAutoMode) {
+                    // Mode otomatis - update berdasarkan data sensor
+                    const isActivated = sensorData && sensorData.ultrasonic_data < 10;
+                    document.getElementById('servoToggle').checked = isActivated;
+                    document.getElementById('ledToggle').checked = isActivated;
+                    document.getElementById('buzzerToggle').checked = isActivated;
+                    document.getElementById('servoStatusText').textContent = isActivated ? 'ON' : 'OFF';
+                } else {
+                    // Mode manual - update berdasarkan status device
+                    if (device.servo !== undefined) {
+                        document.getElementById('servoToggle').checked = device.servo;
+                        document.getElementById('servoStatusText').textContent = device.servo ? 'ON' : 'OFF';
+                    }
+                    if (device.led !== undefined) {
+                        document.getElementById('ledToggle').checked = device.led;
+                    }
+                    if (device.buzzer !== undefined) {
+                        document.getElementById('buzzerToggle').checked = device.buzzer;
+                    }
+                }
+            }
+
+            updateActuatorStatus();
             
-            document.querySelector('small.text-muted').textContent = 'Last updated: ' + new Date().toLocaleString();
+            // Update timestamp
+            document.getElementById('lastUpdated').textContent = 'Last updated: ' + new Date().toLocaleString();
             
-            // Auto control logic
-            if (!document.getElementById('modeAuto').checked) {
-                autoControl(currentData);
+            // Update badge status API
+            const apiBadge = document.getElementById('apiStatus');
+            if (apiBadge) {
+                apiBadge.innerHTML = '<span class="badge bg-info">API Connected</span>';
             }
         }
 
-        // Auto control logic
-        function autoControl(current) {
-            const ultr = current.distance;
-            let servoTarget = 90;
-            let ledOn = false;
-            let buzzerOn = false;
+        // Fallback ke data PHP jika API tidak tersedia
+        function useFallbackData() {
+            console.log('Menggunakan data fallback dari PHP');
+            
+            // Gunakan data dari array PHP dengan increment index
+            currentIndex = (currentIndex + 1) % data.length;
+            const currentData = data[currentIndex];
+            
+            document.getElementById('rt-distance').textContent = currentData.distance.toFixed(2) + ' cm';
+            document.getElementById('rt-rain-status').textContent = currentData.rain;
+            document.getElementById('rt-rain-status').className = 'badge ' + 
+                (currentData.rain === 'Hujan' ? 'badge-hujan' : 'badge-tidak-hujan');
 
-            if (ultr < 30) {
-                servoTarget = 160;
-                ledOn = true;
-                buzzerOn = true;
-            } else if (ultr < 60) {
-                servoTarget = 120;
-                ledOn = true;
-                buzzerOn = false;
+            // Update warning message
+            const warningElement = document.getElementById('distance-warning');
+            if (currentData.distance < 10) {
+                warningElement.innerHTML = '⚠️ Tinggi air kritis! Sistem aktif.';
+                warningElement.className = 'text-danger';
             } else {
-                servoTarget = 40;
-                ledOn = false;
-                buzzerOn = false;
+                warningElement.innerHTML = '✓ Tinggi air normal';
+                warningElement.className = 'text-success';
             }
 
-            servoRange.value = servoTarget;
-            servoValue.textContent = servoTarget;
-            ledToggle.checked = ledOn;
-            buzzerToggle.checked = buzzerOn;
+            // Auto control untuk tampilan
+            if (document.getElementById('modeAuto').checked) {
+                autoControl(currentData);
+            }
+
+            document.getElementById('lastUpdated').textContent = 'Last updated: ' + new Date().toLocaleString();
+            
+            // Update badge status API
+            const apiBadge = document.getElementById('apiStatus');
+            if (apiBadge) {
+                apiBadge.innerHTML = '<span class="badge bg-warning">API Disconnected</span>';
+            }
+        }
+
+        // Update real-time data
+        function updateRealtime() {
+            fetchRealtimeData();
+        }
+
+        // Auto control logic sesuai ESP32 (jarak < 10cm) - untuk tampilan saja
+        function autoControl(current) {
+            const ultr = current.distance;
+            const isActivated = ultr < 10;
+
+            // Hanya update tampilan, tidak kirim perintah ke ESP32
+            document.getElementById('servoToggle').checked = isActivated;
+            document.getElementById('ledToggle').checked = isActivated;
+            document.getElementById('buzzerToggle').checked = isActivated;
+            document.getElementById('servoStatusText').textContent = isActivated ? 'ON' : 'OFF';
             
             updateActuatorStatus();
         }
 
         // Update status aktuator
         function updateActuatorStatus() {
-            document.getElementById('servo-status').textContent = 'ON';
-            document.getElementById('servo-status').className = 'badge bg-success fs-6';
+            const servoToggle = document.getElementById('servoToggle');
+            const ledToggle = document.getElementById('ledToggle');
+            const buzzerToggle = document.getElementById('buzzerToggle');
+
+            // Update servo status
+            document.getElementById('servo-status').textContent = servoToggle.checked ? 'ON' : 'OFF';
+            document.getElementById('servo-status').className = 'badge ' + (servoToggle.checked ? 'bg-success' : 'bg-secondary') + ' fs-6';
+            document.getElementById('servoPosition').textContent = 'Posisi: ' + (servoToggle.checked ? '180° (Tertutup)' : '0° (Terbuka)');
             
+            // Update LED status
             document.getElementById('led-status').textContent = ledToggle.checked ? 'ON' : 'OFF';
             document.getElementById('led-status').className = 'badge ' + (ledToggle.checked ? 'bg-warning' : 'bg-secondary') + ' fs-6';
             
+            // Update buzzer status
             document.getElementById('buzzer-status').textContent = buzzerToggle.checked ? 'ON' : 'OFF';
             document.getElementById('buzzer-status').className = 'badge ' + (buzzerToggle.checked ? 'bg-danger' : 'bg-secondary') + ' fs-6';
         }
 
+        // Fungsi untuk mengirim perintah kontrol ke server
+        function sendControlCommand(controlData) {
+            const applyButton = document.getElementById('applyManual');
+            const applyText = document.getElementById('applyText');
+            const applySpinner = document.getElementById('applySpinner');
+            
+            // Show loading state
+            applyText.textContent = 'Mengirim...';
+            applySpinner.classList.remove('d-none');
+            applyButton.disabled = true;
+
+            let {otomatis, led, buzzer, servo} = controlData;
+
+            if(otomatis === true){
+                led = false;
+                buzzer = false;
+                servo = false;            
+            }
+
+            fetch('http://localhost:8000/command', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    otomatis: otomatis,
+                    led: led,
+                    buzzer: buzzer,
+                    servo: servo
+                }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('Success:', data);
+                showAlert('Perintah berhasil dikirim', 'success');
+                
+                // Refresh data real-time setelah mengirim perintah
+                setTimeout(fetchRealtimeData, 1000);
+            })
+            .catch((error) => {
+                console.error('Error:', error);
+                showAlert('Gagal mengirim perintah', 'danger');
+            })
+            .finally(() => {
+                // Reset button state
+                applyText.textContent = 'Terapkan';
+                applySpinner.classList.add('d-none');
+                applyButton.disabled = false;
+            });
+        }
+
         // Event listeners
         document.getElementById('modeAuto').addEventListener('change', function() {
-            const isManual = this.checked;
-            const label = this.nextElementSibling;
+            const isAuto = this.checked;
+            const controlData = {
+                otomatis: isAuto,
+                led: false,    // Selalu false ketika mode otomatis
+                buzzer: false, // Selalu false ketika mode otomatis  
+                servo: false   // Selalu false ketika mode otomatis
+            };
             
-            if (isManual) {
-                label.textContent = 'Manual';
-                showAlert('Mode diubah ke: Manual', 'warning');
-                toggleManualControls(true); // Enable kontrol manual
-            } else {
-                label.textContent = 'Otomatis';
-                showAlert('Mode diubah ke: Otomatis', 'info');
-                toggleManualControls(false); // Disable kontrol manual
-            }
+            sendControlCommand(controlData);
         });
 
-        document.getElementById('servoRange').addEventListener('input', function() {
-            document.getElementById('servoValue').textContent = this.value;
+        // Servo toggle event
+        document.getElementById('servoToggle').addEventListener('change', function() {
+            document.getElementById('servoStatusText').textContent = this.checked ? 'ON' : 'OFF';
         });
 
         document.getElementById('applyManual').addEventListener('click', function() {
-            showAlert('Kontrol manual diterapkan', 'success');
-            updateActuatorStatus();
+            const controlData = {
+                otomatis: false, // Karena mode manual
+                led: document.getElementById('ledToggle').checked,
+                buzzer: document.getElementById('buzzerToggle').checked,
+                servo: document.getElementById('servoToggle').checked
+            };
+            sendControlCommand(controlData);
         });
 
         // Alert function
         function showAlert(message, type) {
+            // Hapus alert sebelumnya jika ada
+            const existingAlert = document.querySelector('.alert.position-fixed');
+            if (existingAlert) {
+                existingAlert.remove();
+            }
+
             const alertDiv = document.createElement('div');
             alertDiv.className = `alert alert-${type} alert-dismissible fade show position-fixed`;
             alertDiv.style.cssText = 'top: 20px; right: 20px; z-index: 1050; min-width: 300px;';
@@ -817,17 +993,24 @@ $json_data = json_encode($history_data);
             document.body.appendChild(alertDiv);
             
             setTimeout(() => {
-                alertDiv.remove();
+                if (alertDiv.parentNode) {
+                    alertDiv.remove();
+                }
             }, 3000);
         }
 
         // Initialize
         updateActuatorStatus();
-        // Set initial state berdasarkan mode
-        toggleManualControls(<?= $current_data['mode'] == 'manual' ? 'true' : 'false' ?>);
         
-        // Auto update setiap 6 detik
-        setInterval(updateRealtime, 6000);
+        // Set initial state berdasarkan mode
+        const initialMode = <?= $current_data['mode'] == 'manual' ? 'true' : 'false' ?>;
+        toggleManualControls(initialMode);
+
+        // Load data real-time pertama kali
+        fetchRealtimeData();
+
+        // Auto update setiap 3 detik dari API
+        setInterval(updateRealtime, 3000);
     </script>
 </body>
 </html>
